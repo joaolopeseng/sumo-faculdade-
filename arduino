@@ -1,0 +1,108 @@
+// Carrinho controlado por Bluetooth (HC-05) + ponte H TB6612FNG
+//
+// Protocolo: o notebook manda linhas de texto "<esquerdo> <direito>\n",
+// cada valor de -255 (ré total) a 255 (frente total). Ex: "200 200\n".
+// Se nenhum comando chegar em TIMEOUT_MS, os motores param (segurança).
+
+#include <SoftwareSerial.h>
+
+// ---------- Ponte H ----------
+// Motor A = DIREITO
+const int PWMA = 5;
+const int AIN1 = 7;
+const int AIN2 = 8;
+// Motor B = ESQUERDO
+const int PWMB = 6;
+const int BIN1 = 3;
+const int BIN2 = 13;
+const int STBY = 4;
+
+// Se um motor girar ao contrário do esperado, mude para true
+const bool INVERTE_DIREITO  = true;
+const bool INVERTE_ESQUERDO = false;
+
+// ---------- HC-05 ----------
+// TXD do HC-05 -> pino 10 (RX do Arduino)
+// RXD do HC-05 -> pino 11 (TX do Arduino)
+SoftwareSerial bt(10, 11);
+
+const unsigned long TIMEOUT_MS = 300;
+
+char buffer[24];
+byte tamanho = 0;
+unsigned long ultimoComando = 0;
+
+void acionaMotor(int pinPwm, int pin1, int pin2, int velocidade, bool inverte) {
+  velocidade = constrain(velocidade, -255, 255);
+  if (inverte) velocidade = -velocidade;
+
+  if (velocidade > 0) {
+    digitalWrite(pin1, HIGH);
+    digitalWrite(pin2, LOW);
+  } else if (velocidade < 0) {
+    digitalWrite(pin1, LOW);
+    digitalWrite(pin2, HIGH);
+  } else {
+    // freio curto
+    digitalWrite(pin1, HIGH);
+    digitalWrite(pin2, HIGH);
+  }
+  analogWrite(pinPwm, abs(velocidade));
+}
+
+void setMotores(int esquerdo, int direito) {
+  acionaMotor(PWMB, BIN1, BIN2, esquerdo, INVERTE_ESQUERDO);
+  acionaMotor(PWMA, AIN1, AIN2, direito, INVERTE_DIREITO);
+}
+
+void processaLinha(char *linha) {
+  int esquerdo, direito;
+  if (sscanf(linha, "%d %d", &esquerdo, &direito) == 2) {
+    setMotores(esquerdo, direito);
+    ultimoComando = millis();
+    Serial.print("E=");
+    Serial.print(esquerdo);
+    Serial.print(" D=");
+    Serial.println(direito);
+  }
+}
+
+void setup() {
+  pinMode(PWMA, OUTPUT);
+  pinMode(AIN1, OUTPUT);
+  pinMode(AIN2, OUTPUT);
+  pinMode(PWMB, OUTPUT);
+  pinMode(BIN1, OUTPUT);
+  pinMode(BIN2, OUTPUT);
+  pinMode(STBY, OUTPUT);
+
+  digitalWrite(STBY, HIGH);  // liga a ponte H
+  setMotores(0, 0);
+
+  Serial.begin(9600);  // debug pelo USB (Monitor Serial)
+  bt.begin(9600);      // velocidade padrão do HC-05
+  Serial.println("Carrinho pronto. Aguardando Bluetooth...");
+}
+
+void loop() {
+  while (bt.available()) {
+    char c = bt.read();
+    if (c == '\n' || c == '\r') {
+      if (tamanho > 0) {
+        buffer[tamanho] = '\0';
+        processaLinha(buffer);
+        tamanho = 0;
+      }
+    } else if (tamanho < sizeof(buffer) - 1) {
+      buffer[tamanho++] = c;
+    } else {
+      tamanho = 0;  // linha grande demais: descarta
+    }
+  }
+
+  // Segurança: perdeu o sinal -> para
+  if (ultimoComando != 0 && millis() - ultimoComando > TIMEOUT_MS) {
+    setMotores(0, 0);
+    ultimoComando = 0;
+  }
+}
