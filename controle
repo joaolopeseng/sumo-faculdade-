@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""Controla o carrinho pelo teclado via Bluetooth (HC-05).
+
+Uso:  python3 controle.py [MAC ou porta]   (padrão: 00:25:05:31:4B:71)
+
+Com o endereço (MAC) do HC-05 conecta direto, sem rfcomm nem sudo.
+Também aceita uma porta serial, ex: /dev/rfcomm0.
+
+Teclas (segure para andar, solte para parar):
+  W / ↑   frente          S / ↓   ré
+  A / ←   esquerda        D / →   direita
+  SHIFT   turbo (255)     + / -   ajusta velocidade
+  ESPAÇO  freio           ESC     sair
+"""
+import socket
+import subprocess
+import sys
+import time
+
+import pygame
+import serial
+
+PORTA = sys.argv[1] if len(sys.argv) > 1 else "00:25:05:31:4B:71"
+INTERVALO_ENVIO = 0.05  # 20 comandos/s (o Arduino para se ficar 300 ms sem receber)
+
+
+def calcula_motores(frente, giro, velocidade):
+    """frente/giro em {-1, 0, 1} -> (esquerdo, direito) de -255 a 255."""
+    esquerdo = frente + giro
+    direito = frente - giro
+    maior = max(abs(esquerdo), abs(direito), 1)
+    return int(esquerdo / maior * velocidade), int(direito / maior * velocidade)
+
+
+def porta_rfcomm_aberta(mac):
+    """Se o Blueman/rfcomm já conectou nesse MAC, devolve a porta (/dev/rfcommN)."""
+    try:
+        saida = subprocess.run(["rfcomm"], capture_output=True, text=True, timeout=3).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for linha in saida.splitlines():
+        # ex: "rfcomm0: 50:FE:0C:49:F7:87 -> 00:25:05:31:4B:71 channel 1 connected ..."
+        if f"-> {mac.upper()}" in linha.upper():
+            return "/dev/" + linha.split(":")[0]
+    return None
+
+
+def abre_conexao(porta):
+    """Porta serial (/dev/...) ou conexão direta pelo endereço MAC do HC-05."""
+    if not porta.startswith("/dev/"):
+        # O canal do HC-05 só aceita uma conexão: se já estiver aberta, usa ela.
+        porta = porta_rfcomm_aberta(porta) or porta
+    if porta.startswith("/dev/"):
+        print(f"Usando a porta {porta}")
+        return serial.Serial(porta, 9600, timeout=0)
+    sock = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM)
+    sock.settimeout(10)
+    sock.connect((porta, 1))
+    sock.settimeout(None)
+    return sock.makefile("wb", buffering=0)
+
+
+def main():
+    try:
+        bt = abre_conexao(PORTA)
+    except OSError as erro:
+        print(f"Não consegui conectar em {PORTA}: {erro}")
+        print("Confira se o carrinho está ligado e o HC-05 pareado (bluetoothctl, senha 1234).")
+        sys.exit(1)
+
+    pygame.init()
+    tela = pygame.display.set_mode((420, 220))
+    pygame.display.set_caption("Controle do carrinho")
+    fonte = pygame.font.SysFont(None, 28)
+    relogio = pygame.time.Clock()
+
+    velocidade = 180
+    ultimo_envio = 0.0
+    rodando = True
+
+    while rodando:
+        for evento in pygame.event.get():
+            if evento.type == pygame.QUIT:
+                rodando = False
+            elif evento.type == pygame.KEYDOWN:
+                if evento.key == pygame.K_ESCAPE:
+                    rodando = False
+                elif evento.key in (pygame.K_PLUS, pygame.K_EQUALS, pygame.K_KP_PLUS):
+                    velocidade = min(255, velocidade + 15)
+                elif evento.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
+                    velocidade = max(60, velocidade - 15)
+
+        teclas = pygame.key.get_pressed()
+        frente = (teclas[pygame.K_w] or teclas[pygame.K_UP]) - (teclas[pygame.K_s] or teclas[pygame.K_DOWN])
+        giro = (teclas[pygame.K_d] or teclas[pygame.K_RIGHT]) - (teclas[pygame.K_a] or teclas[pygame.K_LEFT])
+        turbo = teclas[pygame.K_LSHIFT] or teclas[pygame.K_RSHIFT]
+
+        if teclas[pygame.K_SPACE]:
+            esquerdo, direito = 0, 0
+        else:
+            esquerdo, direito = calcula_motores(frente, giro, 255 if turbo else velocidade)
+
+        agora = time.monotonic()
+        if agora - ultimo_envio >= INTERVALO_ENVIO:
+            bt.write(f"{esquerdo} {direito}\n".encode())
+            ultimo_envio = agora
+
+        tela.fill((30, 30, 30))
+        linhas = [
+            f"Porta: {PORTA}",
+            f"Velocidade: {velocidade}  (+/-)   SHIFT = turbo",
+            f"Motor esquerdo: {esquerdo:4d}",
+            f"Motor direito:  {direito:4d}",
+            "WASD / setas para andar, ESC para sair",
+        ]
+        for i, texto in enumerate(linhas):
+            tela.blit(fonte.render(texto, True, (230, 230, 230)), (15, 15 + i * 38))
+        pygame.display.flip()
+        relogio.tick(60)
+
+    for _ in range(3):
+        bt.write(b"0 0\n")
+    bt.close()
+    pygame.quit()
+
+
+if __name__ == "__main__":
+    main()
